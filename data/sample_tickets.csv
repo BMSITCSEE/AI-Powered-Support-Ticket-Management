@@ -1,0 +1,21 @@
+title,description,category,urgency,customer_email
+Cannot login to account,I've been trying to login but keep getting an error message. I've tried resetting my password but still can't access my account.,Technical,High,user1@example.com
+Billing discrepancy,I was charged twice for my monthly subscription. Please refund the duplicate charge.,Billing,High,user2@example.com
+Feature request - Dark mode,Would love to see a dark mode option in the application for better night time usage.,Feedback,Low,user3@example.com
+App crashes on startup,The mobile app crashes immediately after opening. Using iPhone 12 with iOS 15.,Technical,Critical,user4@example.com
+Account upgrade question,I want to upgrade my account to premium but don't see the option in settings.,Account,Medium,user5@example.com
+Slow performance issues,The application has been running very slowly for the past week. Pages take forever to load.,Technical,Medium,user6@example.com
+Cancel subscription,I would like to cancel my subscription effective immediately.,Account,Medium,user7@example.com
+Payment method update failed,Trying to update my credit card information but getting an error,Billing,Medium,user8@example.com
+Missing features from documentation,Some features mentioned in docs are not available in my account,General,Low,user9@example.com
+Data export request,Need to export all my data for compliance reasons,Account,High,user10@example.com
+Integration not working,API integration with third-party service failing with 401 error,Technical,High,user11@example.com
+Refund request,Requesting refund for accidental purchase made yesterday,Billing,High,user12@example.com
+Server timeout errors,Getting timeout errors when trying to generate reports,Technical,High,user13@example.com
+Password reset not working,Password reset email never arrives to my inbox,Technical,Critical,user14@example.com
+Invoice download issue,Cannot download invoices from billing section,Billing,Medium,user15@example.com
+Feature suggestion - Calendar view,Would be great to have calendar view for scheduled tasks,Feedback,Low,user16@example.com
+Account locked,My account has been locked for suspicious activity but I haven't done anything wrong,Account,Critical,user17@example.com
+Duplicate charges on card,I see three identical charges on my credit card statement,Billing,Critical,user18@example.com
+Mobile app sync issues,Data not syncing between mobile app and web version,Technical,Medium,user19@example.com
+General inquiry about pricing,What's the difference between Pro and Enterprise plans?,General,Low,user20@example.com
