@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: ticket_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ticket_system}
+      MYSQL_USER: ${MYSQL_USER:-ticketuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ticketpass}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: ticket_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Celery Worker
+  celery-worker:
+    build: .
+    container_name: ticket_celery_worker
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - MYSQL_HOST=mysql
+      - REDIS_HOST=redis
+      - PYTHONPATH=/app
+    volumes:
+      - ./models/saved:/app/models/saved
+      - ./logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+
+  # Celery Beat (Scheduler)
+  celery-beat:
+    build: .
+    container_name: ticket_celery_beat
+    command: celery -A tasks.celery_app beat --loglevel=info
+    environment:
+      - MYSQL_HOST=mysql
+      - REDIS_HOST=redis
+      - PYTHONPATH=/app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+
+  # Flower (Celery Monitoring)
+  flower:
+    build: .
+    container_name: ticket_flower
+    command: celery -A tasks.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - MYSQL_HOST=mysql
+      - REDIS_HOST=redis
+      - PYTHONPATH=/app
+    depends_on:
+      - redis
+      - celery-worker
+    env_file:
+      - .env
+
+  # Streamlit App
+  streamlit:
+    build: .
+    container_name: ticket_streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      - MYSQL_HOST=mysql
+      - REDIS_HOST=redis
+      - PYTHONPATH=/app
+    volumes:
+      - ./app:/app/app
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    command: streamlit run app/main.py --server.maxUploadSize=50
+
+volumes:
+  mysql_data:
+  redis_data:
