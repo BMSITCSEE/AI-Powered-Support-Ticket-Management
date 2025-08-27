@@ -1,37 +1,4 @@
 services:
-  # MySQL Database
-  mysql:
-    image: mysql:8.0
-    container_name: ticket_mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-ticket_system}
-      MYSQL_USER: ${MYSQL_USER:-ticketuser}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ticketpass}
-    ports:
-      - "3306:3306"
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
-
-  # Redis
-  redis:
-    image: redis:7-alpine
-    container_name: ticket_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  # Celery Worker
   celery-worker:
     build: .
     container_name: ticket_celery_worker
@@ -54,7 +21,6 @@ services:
     env_file:
       - .env
 
-  # Celery Beat (Scheduler)
   celery-beat:
     build: .
     container_name: ticket_celery_beat
@@ -74,7 +40,6 @@ services:
     env_file:
       - .env
 
-  # Flower (Celery Monitoring)
   flower:
     build: .
     container_name: ticket_flower
@@ -95,7 +60,6 @@ services:
     env_file:
       - .env
 
-  # Streamlit App
   streamlit:
     build: .
     container_name: ticket_streamlit
@@ -122,7 +86,3 @@ services:
     env_file:
       - .env
     command: streamlit run app/main.py --server.maxUploadSize=50
-
-volumes:
-  mysql_data:
-  redis_data:

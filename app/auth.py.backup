@@ -116,31 +116,19 @@ def check_authentication():
             
             if login_button:
                 if username and password:
-                    # For demo purposes, accept admin/admin
-                    if username == "admin" and password == "admin":
+                    user = verify_user(username, password)
+                    if user:
                         st.session_state.authenticated = True
-                        st.session_state.user = {
-                            'id': 1,
-                            'username': 'admin',
-                            'role': 'admin',
-                            'email': 'admin@example.com'
-                        }
-                        st.success("Welcome back, admin!")
+                        st.session_state.user = user
+                        st.session_state.token = create_jwt_token(
+                            user['id'], 
+                            user['username'], 
+                            user['role']
+                        )
+                        st.success(f"Welcome back, {user['username']}!")
                         st.rerun()
                     else:
-                        user = verify_user(username, password)
-                        if user:
-                            st.session_state.authenticated = True
-                            st.session_state.user = user
-                            st.session_state.token = create_jwt_token(
-                                user['id'], 
-                                user['username'], 
-                                user['role']
-                            )
-                            st.success(f"Welcome back, {user['username']}!")
-                            st.rerun()
-                        else:
-                            st.error("Invalid username or password")
+                        st.error("Invalid username or password")
                 else:
                     st.error("Please enter both username and password")
         
@@ -180,7 +168,7 @@ def create_password_reset_token(email):
     # Store token in database (simplified)
     connection = get_connection()
     if connection:
-        cursor = connection.cursor()
+                cursor = connection.cursor()
         cursor.execute("""
         UPDATE users 
         SET reset_token = %s, reset_token_expiry = %s 

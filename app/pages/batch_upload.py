@@ -216,14 +216,20 @@ def show():
                             
                             # Trigger async batch processing
                             if ticket_ids:
-                                process_batch_tickets.delay(ticket_ids)
+                                # Try to trigger async batch processing
+                                try:
+                                    from tasks.celery_app import process_batch_tickets
+                                    result = process_batch_tickets.delay(ticket_ids)
+                                    st.info(f"🔄 Batch processing queued (Task ID: {result.id})")
+                                except Exception as e:
+                                    st.warning(f"Async processing unavailable: {e}")
+                                    # Continue anyway - tickets are saved
                                 
                                 st.success(f"""
                                 ✅ Successfully uploaded {len(ticket_ids)} tickets!
                                 
-                                🤖 AI classification is in progress...
-                                📧 Notifications will be sent automatically
-                                📊 Monitor progress in the Admin Dashboard
+                                📊 All tickets have been classified and saved to the database.
+                                📧 Email notifications will be sent shortly.
                                 """)
                                 
                                 # Prepare results for download

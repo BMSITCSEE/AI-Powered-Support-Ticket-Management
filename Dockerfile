@@ -10,14 +10,16 @@ RUN apt-get update && apt-get install -y \
     g++ \
     git \
     curl \
-    libmysqlclient-dev \
+    default-libmysqlclient-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY requirements-docker.txt requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip and install dependencies with increased timeout
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir --timeout=300 -r requirements.txt
 
 # Download NLTK data
 RUN python -m nltk.downloader punkt stopwords wordnet

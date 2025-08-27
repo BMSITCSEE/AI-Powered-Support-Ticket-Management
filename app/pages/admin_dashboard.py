@@ -20,27 +20,37 @@ def show():
     st.markdown("---")
     
     # Fetch statistics
-    stats = get_ticket_stats()
+    try:
+        stats = get_ticket_stats()
+    except Exception as e:
+        st.error(f"Error fetching statistics: {str(e)}")
+        stats = {'total': 0, 'by_category': [], 'by_urgency': [], 'by_status': []}
     
     # Summary metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
+        total_tickets = stats.get('total', 0)
         st.metric(
             "Total Tickets", 
-            stats['total'],
+            total_tickets,
             delta="+12% from last week"
         )
     
     with col2:
-        open_tickets = sum(s['count'] for s in stats['by_status'] if s['status'] == 'Open')
+        open_tickets = 0
+        if stats.get('by_status'):
+            open_tickets = sum(s.get('count', 0) for s in stats['by_status'] if s.get('status') == 'Open')
         st.metric(
             "Open Tickets", 
             open_tickets,
             delta="-5% from yesterday"
         )
-        with col3:
-        critical_tickets = sum(s['count'] for s in stats['by_urgency'] if s['urgency'] == 'Critical')
+    
+    with col3:
+        critical_tickets = 0
+        if stats.get('by_urgency'):
+            critical_tickets = sum(s.get('count', 0) for s in stats['by_urgency'] if s.get('urgency') == 'Critical')
         st.metric(
             "Critical Issues", 
             critical_tickets,
@@ -63,43 +73,65 @@ def show():
     with col1:
         # Category distribution
         st.subheader("Tickets by Category")
-        if stats['by_category']:
-            df_category = pd.DataFrame(stats['by_category'])
-            fig_category = px.pie(
-                df_category, 
-                values='count', 
-                names='category',
-                color_discrete_sequence=px.colors.qualitative.Set3
-            )
-            st.plotly_chart(fig_category, use_container_width=True)
+        if stats.get('by_category'):
+            try:
+                df_category = pd.DataFrame(stats['by_category'])
+                if not df_category.empty:
+                    fig_category = px.pie(
+                        df_category, 
+                        values='count', 
+                        names='category',
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    st.plotly_chart(fig_category, use_container_width=True)
+                else:
+                    st.info("No category data available")
+            except Exception as e:
+                st.error(f"Error creating category chart: {str(e)}")
+        else:
+            st.info("No category data available")
     
     with col2:
         # Urgency distribution
         st.subheader("Tickets by Urgency")
-        if stats['by_urgency']:
-            df_urgency = pd.DataFrame(stats['by_urgency'])
-            # Order by urgency level
-            urgency_order = ['Critical', 'High', 'Medium', 'Low']
-            df_urgency['urgency'] = pd.Categorical(
-                df_urgency['urgency'], 
-                categories=urgency_order, 
-                ordered=True
-            )
-            df_urgency = df_urgency.sort_values('urgency')
-            
-            fig_urgency = px.bar(
-                df_urgency, 
-                x='urgency', 
-                y='count',
-                color='urgency',
-                color_discrete_map={
-                    'Critical': '#ff4444',
-                    'High': '#ff8800',
-                    'Medium': '#ffbb33',
-                    'Low': '#00C851'
-                }
-            )
-            st.plotly_chart(fig_urgency, use_container_width=True)
+        if stats.get('by_urgency'):
+            try:
+                df_urgency = pd.DataFrame(stats['by_urgency'])
+                if not df_urgency.empty:
+                    # Define urgency order
+                    urgency_order = ['Critical', 'High', 'Medium', 'Low']
+                    
+                    # Create urgency dataframe with all levels
+                    urgency_data = []
+                    for urgency in urgency_order:
+                        count = 0
+                        for item in stats['by_urgency']:
+                            if item.get('urgency') == urgency:
+                                count = item.get('count', 0)
+                                break
+                        urgency_data.append({'urgency': urgency, 'count': count})
+                    
+                    df_urgency = pd.DataFrame(urgency_data)
+                    
+                    fig_urgency = px.bar(
+                        df_urgency, 
+                        x='urgency', 
+                        y='count',
+                        color='urgency',
+                        color_discrete_map={
+                            'Critical': '#ff4444',
+                            'High': '#ff8800',
+                            'Medium': '#ffbb33',
+                            'Low': '#00C851'
+                        }
+                    )
+                    st.plotly_chart(fig_urgency, use_container_width=True)
+                else:
+                    st.info("No urgency data available")
+            except Exception as e:
+                st.error(f"Error creating urgency chart: {str(e)}")
+        else:
+            st.info("No urgency data available")
     
     # Time series chart
     st.subheader("Ticket Volume Trend")
