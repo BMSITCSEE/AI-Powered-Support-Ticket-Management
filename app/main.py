@@ -16,14 +16,17 @@ from app.auth import check_authentication, logout
 from app.pages import submit_ticket, batch_upload, admin_dashboard
 
 
+#
 # Configure logging (safe for local + Streamlit Cloud)
 import os
 
 handlers = [logging.StreamHandler()]  # always log to console
 
-# Try enabling file logging only if local filesystem is writable
+# Try enabling file logging only if filesystem allows
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+log_dir = os.path.abspath(log_dir)
+
 try:
-    log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "app.log")
     handlers.append(logging.FileHandler(log_file))
@@ -35,8 +38,8 @@ logging.basicConfig(
     format=Config.LOG_FORMAT,
     handlers=handlers
 )
-
 logger = logging.getLogger(__name__)
+
 
 
 # Page configuration
