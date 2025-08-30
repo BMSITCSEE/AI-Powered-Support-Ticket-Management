@@ -15,16 +15,29 @@ from app.database import init_db
 from app.auth import check_authentication, logout
 from app.pages import submit_ticket, batch_upload, admin_dashboard
 
-# Configure logging
+
+# Configure logging (safe for local + Streamlit Cloud)
+import os
+
+handlers = [logging.StreamHandler()]  # always log to console
+
+# Try enabling file logging only if local filesystem is writable
+try:
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "app.log")
+    handlers.append(logging.FileHandler(log_file))
+except Exception as e:
+    print(f"⚠️ File logging disabled: {e}")
+
 logging.basicConfig(
     level=getattr(logging, Config.LOG_LEVEL),
     format=Config.LOG_FORMAT,
-    handlers=[
-        logging.FileHandler(Config.LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=handlers
 )
+
 logger = logging.getLogger(__name__)
+
 
 # Page configuration
 st.set_page_config(
