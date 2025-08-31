@@ -9,6 +9,8 @@ from app.config import Config
 from app.database import get_connection
 import bcrypt
 import secrets
+import psycopg2.extras
+
 
 def hash_password(password):
     """Hash password using bcrypt"""
@@ -24,7 +26,7 @@ def verify_user(username, password):
     if not connection:
         return False
     
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     cursor.execute("""
     SELECT id, username, password_hash, role, email
@@ -198,7 +200,7 @@ def verify_reset_token(token):
     if not connection:
         return None
     
-    cursor = connection.cursor(dictionary=True)
+    cursor = connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
     SELECT id, username, email 
     FROM users 
