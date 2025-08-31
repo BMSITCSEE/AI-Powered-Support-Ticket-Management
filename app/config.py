@@ -23,11 +23,12 @@ class Config:
     PORT = int(os.getenv("PORT", 8501))
     
     # Database settings
-    MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
-    MYSQL_PORT = int(os.getenv("MYSQL_PORT", 3306))
-    MYSQL_USER = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "password")
-    MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "ticket_system")
+    # Postgres settings
+    POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
+    POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+    POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "password")
+    POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "ticket_system")
     
     # Connection pool settings
     DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", 5))
@@ -156,8 +157,7 @@ class Config:
     
     @classmethod
     def get_db_uri(cls):
-        """Get database connection URI"""
-        return f"mysql://{cls.MYSQL_USER}:{cls.MYSQL_PASSWORD}@{cls.MYSQL_HOST}:{cls.MYSQL_PORT}/{cls.MYSQL_DATABASE}"
+        return f"postgresql+psycopg2://{cls.POSTGRES_USER}:{cls.POSTGRES_PASSWORD}@{cls.POSTGRES_HOST}:{cls.POSTGRES_PORT}/{cls.POSTGRES_DATABASE}"
     
     @classmethod
     def get_redis_url(cls):
