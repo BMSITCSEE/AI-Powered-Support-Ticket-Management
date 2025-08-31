@@ -1,567 +1,1010 @@
 """
-Database models and operations
+Database module for PostgreSQL/Neon support
+Migrated from MySQL to PostgreSQL with Neon cloud database support
 """
-import mysql.connector
-from mysql.connector import Error, pooling
-from datetime import datetime
-from app.config import Config
-import pandas as pd
-import logging
 
+import os
+import logging
+from typing import Optional, Dict, Any, List, Generator
+from contextlib import contextmanager
+from datetime import datetime
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Text, DateTime, 
+    Float, Boolean, ForeignKey, Enum, Index, text
+)
+from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
+from sqlalchemy.pool import NullPool, QueuePool
+from sqlalchemy.exc import SQLAlchemyError, OperationalError
+import enum
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Connection pool for better performance
-connection_pool = None
+# Create declarative base
+Base = declarative_base()
 
-def init_connection_pool():
-    """Initialize connection pool"""
-    global connection_pool
-    try:
-        connection_pool = pooling.MySQLConnectionPool(
-            pool_name="ticket_pool",
-            pool_size=5,
-            pool_reset_session=True,
-            host=Config.MYSQL_HOST,
-            port=Config.MYSQL_PORT,
-            user=Config.MYSQL_USER,
-            password=Config.MYSQL_PASSWORD,
-            database=Config.MYSQL_DATABASE
-        )
-        logger.info("Connection pool created successfully")
-    except Error as e:
-        logger.error(f"Error creating connection pool: {e}")
+# Enums for ticket system
+class TicketStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing" 
+    PROCESSED = "processed"
+    FAILED = "failed"
 
-def get_connection():
-    """Get connection from pool"""
-    global connection_pool
-    if connection_pool is None:
-        init_connection_pool()
+class TicketCategory(str, enum.Enum):
+    TECHNICAL = "technical"
+    BILLING = "billing"
+    GENERAL = "general"
+    FEEDBACK = "feedback"
+    OTHER = "other"
+
+class UrgencyLevel(str, enum.Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class DatabaseConfig:
+    """Database configuration handler for PostgreSQL/Neon"""
     
-    try:
-        return connection_pool.get_connection()
-    except Error as e:
-        logger.error(f"Error getting connection: {e}")
-        # Fallback to direct connection
+    @staticmethod
+    def get_database_url() -> str:
+        """
+        Get PostgreSQL database URL with Neon support
+        Supports both standard PostgreSQL and Neon connection strings
+        """
+        # Check for direct DATABASE_URL (common in cloud deployments)
+        database_url = os.getenv('DATABASE_URL')
+        
+        if database_url:
+            # Handle Neon's postgres:// format
+            if database_url.startswith('postgres://'):
+                database_url = database_url.replace('postgres://', 'postgresql://', 1)
+            
+            # Add SSL mode for Neon if not present
+            if 'neon.tech' in database_url and 'sslmode' not in database_url:
+                separator = '&' if '?' in database_url else '?'
+                database_url += f'{separator}sslmode=require'
+            
+            return database_url
+        
+        # Fallback to component-based configuration
+        host = os.getenv('POSTGRES_HOST', 'localhost')
+        port = os.getenv('POSTGRES_PORT', '5432')
+        database = os.getenv('POSTGRES_DB', 'ticket_system')
+        user = os.getenv('POSTGRES_USER', 'postgres')
+        password = os.getenv('POSTGRES_PASSWORD', '')
+        
+        if password:
+            return f'postgresql://{user}:{password}@{host}:{port}/{database}'
+        return f'postgresql://{user}@{host}:{port}/{database}'
+
+
+class Database:
+    """PostgreSQL/Neon database manager with connection pooling"""
+    
+    def __init__(self, database_url: Optional[str] = None):
+        self.database_url = database_url or DatabaseConfig.get_database_url()
+        self._engine = None
+        self._session_factory = None
+    
+    @property
+    def engine(self):
+        """Lazy-load database engine with appropriate pooling"""
+        if self._engine is None:
+            self._engine = self._create_engine()
+        return self._engine
+    
+    def _create_engine(self):
+        """Create SQLAlchemy engine optimized for PostgreSQL/Neon"""
+        
+        # Detect if using Neon
+        is_neon = 'neon.tech' in self.database_url
+        
+        # Configure engine based on environment
+        if is_neon:
+            # Neon optimized settings
+            engine_config = {
+                'pool_pre_ping': True,  # Verify connections
+                'pool_size': 5,         # Smaller pool for serverless
+                'max_overflow': 10,
+                'pool_recycle': 300,    # Recycle connections every 5 min
+                'connect_args': {
+                    'connect_timeout': 30,
+                    'options': '-c statement_timeout=30000',  # 30s timeout
+                    'sslmode': 'require'
+                }
+            }
+        else:
+            # Standard PostgreSQL settings
+            engine_config = {
+                'pool_pre_ping': True,
+                'pool_size': 10,
+                'max_overflow': 20,
+                'pool_recycle': 3600,
+                'connect_args': {
+                    'connect_timeout': 10,
+                    'options': '-c statement_timeout=60000'  # 60s timeout
+                }
+            }
+        
+        # Add echo for debugging in development
+        if os.getenv('DEBUG', 'false').lower() == 'true':
+            engine_config['echo'] = True
+        
         try:
-            return mysql.connector.connect(
-                host=Config.MYSQL_HOST,
-                port=Config.MYSQL_PORT,
-                user=Config.MYSQL_USER,
-                password=Config.MYSQL_PASSWORD,
-                database=Config.MYSQL_DATABASE
+            engine = create_engine(self.database_url, **engine_config)
+            
+            # Test connection
+            with engine.connect() as conn:
+                result = conn.execute(text('SELECT 1'))
+                logger.info(f"Database connected successfully. PostgreSQL version: {result.scalar()}")
+            
+            return engine
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to database: {e}")
+            raise
+    
+    @property
+    def session_factory(self):
+        """Get session factory"""
+        if self._session_factory is None:
+            self._session_factory = sessionmaker(
+                bind=self.engine,
+                expire_on_commit=False,
+                autoflush=False
             )
-        except Error as e:
-            logger.error(f"Error connecting to MySQL: {e}")
-            return None
+        return self._session_factory
+    
+    def get_session(self) -> Session:
+        """Get a new database session"""
+        return self.session_factory()
+    
+    @contextmanager
+    def session_scope(self) -> Generator[Session, None, None]:
+        """
+        Provide a transactional scope for database operations
+        
+        Usage:
+            with db.session_scope() as session:
+                session.add(ticket)
+        """
+        session = self.get_session()
+        try:
+            yield session
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Database transaction failed: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def create_tables(self):
+        """Create all database tables"""
+        try:
+            Base.metadata.create_all(bind=self.engine)
+            logger.info("Database tables created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create tables: {e}")
+            raise
+    
+    def drop_tables(self):
+        """Drop all database tables (use with caution!)"""
+        try:
+            Base.metadata.drop_all(bind=self.engine)
+            logger.warning("All database tables dropped")
+        except Exception as e:
+            logger.error(f"Failed to drop tables: {e}")
+            raise
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Check database health and connection"""
+        try:
+            with self.engine.connect() as conn:
+                # PostgreSQL health check query
+                result = conn.execute(text("""
+                    SELECT 
+                        version() as postgres_version,
+                        current_database() as database_name,
+                        pg_database_size(current_database()) as database_size,
+                        count(*) as active_connections
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                """))
+                
+                row = result.first()
+                return {
+                    'status': 'healthy',
+                    'postgres_version': row[0],
+                    'database_name': row[1],
+                    'database_size_bytes': row[2],
+                    'active_connections': row[3],
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    
+    def close(self):
+        """Close all database connections"""
+        if self._engine:
+            self._engine.dispose()
+            logger.info("Database connections closed")
 
-def init_db():
-    """Initialize database tables"""
-    connection = get_connection()
-    if not connection:
-        return False
-    
-    cursor = connection.cursor()
-    
-    try:
-        # Create tickets table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tickets (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            description TEXT NOT NULL,
-            category VARCHAR(50),
-            urgency VARCHAR(20),
-            status VARCHAR(20) DEFAULT 'Open',
-            customer_email VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            resolved_at TIMESTAMP NULL,
-            assigned_to VARCHAR(255),
-            resolution_notes TEXT,
-            satisfaction_rating INT,
-            INDEX idx_category (category),
-            INDEX idx_urgency (urgency),
-            INDEX idx_status (status),
-            INDEX idx_created (created_at),
-            INDEX idx_email (customer_email)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        
-        # Create users table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL,
-            email VARCHAR(255) UNIQUE NOT NULL,
-            role VARCHAR(20) DEFAULT 'user',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_login TIMESTAMP NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            reset_token VARCHAR(255),
-            reset_token_expiry TIMESTAMP NULL,
-            INDEX idx_username (username),
-            INDEX idx_email (email)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        
-        # Create notifications table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            ticket_id INT,
-            type VARCHAR(50),
-            recipient VARCHAR(255),
-            subject VARCHAR(255),
-            message TEXT,
-            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status VARCHAR(20) DEFAULT 'Pending',
-            error_message TEXT,
-            retry_count INT DEFAULT 0,
-            FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
-            INDEX idx_ticket (ticket_id),
-            INDEX idx_status (status),
-            INDEX idx_sent (sent_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        
-        # Create ticket_history table for audit trail
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ticket_history (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            ticket_id INT,
-            user_id INT,
-            action VARCHAR(50),
-            old_value TEXT,
-            new_value TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
-            FOREIGN KEY (user_id) REFERENCES users(id),
-            INDEX idx_ticket_history (ticket_id),
-            INDEX idx_created_history (created_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        
-        # Create user_permissions table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_permissions (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id INT,
-            permission VARCHAR(50),
-            granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            granted_by INT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (granted_by) REFERENCES users(id),
-            UNIQUE KEY unique_user_permission (user_id, permission)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """)
-        
-        # Create default admin user if not exists
-        cursor.execute("""
-        INSERT IGNORE INTO users (username, password_hash, email, role)
-        VALUES ('admin', '$2b$12$YourHashedPasswordHere', 'admin@example.com', 'admin')
-        """)
-        
-        connection.commit()
-        logger.info("Database initialized successfully")
-        return True
-        
-    except Error as e:
-        logger.error(f"Error initializing database: {e}")
-        return False
-    finally:
-        cursor.close()
-        connection.close()
 
-def save_ticket(title, description, category, urgency, customer_email):
-    """Save a new ticket to database"""
-    connection = get_connection()
-    if not connection:
-        return None
+# Models
+class User(Base):
+    __tablename__ = 'users'
     
-    cursor = connection.cursor()
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False)
+    full_name = Column(String(255))
+    is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    try:
-        cursor.execute("""
-        INSERT INTO tickets (title, description, category, urgency, customer_email)
-        VALUES (%s, %s, %s, %s, %s)
-        """, (title, description, category, urgency, customer_email))
-        
-        connection.commit()
-        ticket_id = cursor.lastrowid
-        
-        # Log the action
-        log_ticket_action(ticket_id, None, 'created', None, f'Category: {category}, Urgency: {urgency}')
-        
-        return ticket_id
-    except Error as e:
-        logger.error(f"Error saving ticket: {e}")
-        connection.rollback()
-        return None
-    finally:
-        cursor.close()
-        connection.close()
+    # Relationships
+    tickets = relationship("Ticket", back_populates="user", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<User {self.username}>"
 
-def get_all_tickets(filters=None):
-    """Retrieve all tickets with optional filters"""
-    connection = get_connection()
-    if not connection:
-        return pd.DataFrame()
+
+class Ticket(Base):
+    __tablename__ = 'tickets'
     
-    query = """
-    SELECT id, title, description, category, urgency, status, 
-           customer_email, created_at, updated_at, assigned_to,
-           TIMESTAMPDIFF(HOUR, created_at, IFNULL(resolved_at, NOW())) as resolution_hours
-    FROM tickets
-    WHERE 1=1
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    
+    # Classification fields
+    category = Column(Enum(TicketCategory), default=TicketCategory.OTHER, index=True)
+    urgency = Column(Enum(UrgencyLevel), default=UrgencyLevel.MEDIUM, index=True)
+    status = Column(Enum(TicketStatus), default=TicketStatus.PENDING, index=True)
+    
+    # ML model results
+    confidence_score = Column(Float, default=0.0)
+    model_version = Column(String(50))
+    processing_time_ms = Column(Integer)
+    
+    # User relationship
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    user_email = Column(String(255))  # Denormalized for quick access
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    processed_at = Column(DateTime)
+    
+    # Relationships
+    user = relationship("User", back_populates="tickets")
+    
+    # Indexes for performance
+    __table_args__ = (
+        Index('idx_status_created', 'status', 'created_at'),
+        Index('idx_category_urgency', 'category', 'urgency'),
+    )
+    
+    def __repr__(self):
+        return f"<Ticket {self.id}: {self.title[:50]}...>"
+
+
+# Singleton database instance
+_db_instance = None
+
+def get_database() -> Database:
+    """Get singleton database instance"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+    return _db_instance
+
+
+# Convenience functions for backward compatibility
+def get_db_session() -> Session:
+    """Get a new database session"""
+    return get_database().get_session()
+
+
+@contextmanager
+def get_db():
     """
+    Dependency injection for FastAPI/Streamlit
     
-    params = []
-    
-    if filters:
-        if filters.get('status'):
-            query += " AND status = %s"
-            params.append(filters['status'])
-        if filters.get('category'):
-            query += " AND category = %s"
-            params.append(filters['category'])
-        if filters.get('urgency'):
-            query += " AND urgency = %s"
-            params.append(filters['urgency'])
-        if filters.get('date_from'):
-            query += " AND created_at >= %s"
-            params.append(filters['date_from'])
-        if filters.get('date_to'):
-            query += " AND created_at <= %s"
-            params.append(filters['date_to'])
-    
-    query += " ORDER BY created_at DESC"
-    
+    Usage:
+        with get_db() as db:
+            tickets = db.query(Ticket).all()
+    """
+    db = get_database()
+    session = db.get_session()
     try:
-        df = pd.read_sql(query, connection, params=params)
-        return df
-    except Error as e:
-        logger.error(f"Error fetching tickets: {e}")
-        return pd.DataFrame()
+        yield session
     finally:
-        connection.close()
+        session.close()
 
-def get_ticket_by_id(ticket_id):
-    """Get single ticket by ID"""
-    connection = get_connection()
-    if not connection:
-        return None
-    
-    cursor = connection.cursor(dictionary=True)
-    
-    cursor.execute("""
-    SELECT * FROM tickets WHERE id = %s
-    """, (ticket_id,))
-    
-    ticket = cursor.fetchone()
-    cursor.close()
-    connection.close()
+
+def init_database():
+    """Initialize database and create tables"""
+    db = get_database()
+    db.create_tables()
+    logger.info("Database initialized successfully")
+
+
+def execute_query(query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Execute raw SQL query (use sparingly)"""
+    db = get_database()
+    with db.session_scope() as session:
+        result = session.execute(text(query), params or {})
+        if result.returns_rows:
+            return [dict(row._mapping) for row in result]
+        return []
+
+
+# Helper functions for common operations
+def create_ticket(
+    title: str, 
+    description: str, 
+    user_id: Optional[int] = None,
+    user_email: Optional[str] = None
+) -> Ticket:
+    """Create a new ticket"""
+    db = get_database()
+    with db.session_scope() as session:
+        ticket = Ticket(
+            title=title,
+            description=description,
+            user_id=user_id,
+            user_email=user_email
+        )
+        session.add(ticket)
+        session.flush()
+        ticket_id = ticket.id
     
     return ticket
 
-def get_ticket_stats():
+
+def get_ticket_by_id(ticket_id: int) -> Optional[Ticket]:
+    """Get ticket by ID"""
+    db = get_database()
+    with db.session_scope() as session:
+        return session.query(Ticket).filter(Ticket.id == ticket_id).first()
+
+
+def update_ticket_classification(
+    ticket_id: int,
+    category: TicketCategory,
+    urgency: UrgencyLevel,
+    confidence_score: float,
+    processing_time_ms: int
+) -> bool:
+    """Update ticket classification results"""
+    db = get_database()
+    with db.session_scope() as session:
+        ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if ticket:
+            ticket.category = category
+            ticket.urgency = urgency
+            ticket.confidence_score = confidence_score
+            ticket.processing_time_ms = processing_time_ms
+            ticket.status = TicketStatus.PROCESSED
+            ticket.processed_at = datetime.utcnow()
+            return True
+        return False
+
+
+def get_pending_tickets(limit: int = 100) -> List[Ticket]:
+    """Get pending tickets for processing"""
+    db = get_database()
+    with db.session_scope() as session:
+        return session.query(Ticket)\
+            .filter(Ticket.status == TicketStatus.PENDING)\
+            .order_by(Ticket.created_at)\
+            .limit(limit)\
+            .all()
+
+
+def get_tickets_by_status(status: TicketStatus, limit: int = 100) -> List[Ticket]:
+    """Get tickets by status"""
+    db = get_database()
+    with db.session_scope() as session:
+        return session.query(Ticket)\
+            .filter(Ticket.status == status)\
+            .order_by(Ticket.created_at.desc())\
+            .limit(limit)\
+            .all()
+
+
+def get_ticket_statistics() -> Dict[str, Any]:
     """Get ticket statistics for dashboard"""
-    connection = get_connection()
-    if not connection:
-        return {}
-    
-    cursor = connection.cursor(dictionary=True)
-    
-    try:
+    db = get_database()
+    with db.session_scope() as session:
         # Total tickets
-        cursor.execute("SELECT COUNT(*) as total FROM tickets")
-        total = cursor.fetchone()['total']
+        total_tickets = session.query(Ticket).count()
         
-        # By category
-        cursor.execute("""
-        SELECT category, COUNT(*) as count 
-        FROM tickets 
-        GROUP BY category
-        ORDER BY count DESC
-        """)
-        by_category = cursor.fetchall()
+        # Tickets by status
+        status_stats = {}
+        for status in TicketStatus:
+            count = session.query(Ticket).filter(Ticket.status == status).count()
+            status_stats[status.value] = count
         
-        # By urgency
-        cursor.execute("""
-        SELECT urgency, COUNT(*) as count 
-        FROM tickets 
-        GROUP BY urgency
-        ORDER BY FIELD(urgency, 'Critical', 'High', 'Medium', 'Low')
-        """)
-        by_urgency = cursor.fetchall()
+        # Tickets by category
+        category_stats = {}
+        for category in TicketCategory:
+            count = session.query(Ticket).filter(Ticket.category == category).count()
+            category_stats[category.value] = count
         
-        # By status
-        cursor.execute("""
-        SELECT status, COUNT(*) as count 
-        FROM tickets 
-        GROUP BY status
-        ORDER BY count DESC
-        """)
-        by_status = cursor.fetchall()
+        # Tickets by urgency
+        urgency_stats = {}
+        for urgency in UrgencyLevel:
+            count = session.query(Ticket).filter(Ticket.urgency == urgency).count()
+            urgency_stats[urgency.value] = count
         
-        # Average resolution time
-        cursor.execute("""
-        SELECT 
-            AVG(TIMESTAMPDIFF(HOUR, created_at, resolved_at)) as avg_resolution_hours,
-            urgency
-        FROM tickets 
-        WHERE resolved_at IS NOT NULL
-        GROUP BY urgency
-        """)
-        resolution_times = cursor.fetchall()
+        # Average processing time
+        avg_processing_time = session.query(
+            text('AVG(processing_time_ms)')
+        ).select_from(Ticket).filter(
+            Ticket.processing_time_ms.isnot(None)
+        ).scalar() or 0
+        
+        # Average confidence score
+        avg_confidence = session.query(
+            text('AVG(confidence_score)')
+        ).select_from(Ticket).filter(
+            Ticket.confidence_score.isnot(None)
+        ).scalar() or 0
         
         return {
-            'total': total,
-            'by_category': by_category,
-            'by_urgency': by_urgency,
-            'by_status': by_status,
-            'resolution_times': resolution_times
+            'total_tickets': total_tickets,
+            'by_status': status_stats,
+            'by_category': category_stats,
+            'by_urgency': urgency_stats,
+            'avg_processing_time_ms': float(avg_processing_time),
+            'avg_confidence_score': float(avg_confidence),
+            'timestamp': datetime.utcnow().isoformat()
         }
-    except Error as e:
-        logger.error(f"Error getting stats: {e}")
-        return {}
-    finally:
-        cursor.close()
-        connection.close()
 
-def update_ticket_status(ticket_id, status, assigned_to=None, resolution_notes=None):
-    """Update ticket status and assignment"""
-    connection = get_connection()
-    if not connection:
-        return False
-    
-    cursor = connection.cursor()
-    
-    try:
-        # Get current values for history
-        cursor.execute("SELECT status, assigned_to FROM tickets WHERE id = %s", (ticket_id,))
-        current = cursor.fetchone()
-        
-        # Build update query
-        update_fields = ["status = %s"]
-        params = [status]
-        
-        if assigned_to is not None:
-            update_fields.append("assigned_to = %s")
-            params.append(assigned_to)
-        
-        if resolution_notes is not None:
-            update_fields.append("resolution_notes = %s")
-            params.append(resolution_notes)
-        
-        if status == 'Resolved':
-            update_fields.append("resolved_at = NOW()")
-        
-        params.append(ticket_id)
-        
-        query = f"UPDATE tickets SET {', '.join(update_fields)} WHERE id = %s"
-        cursor.execute(query, params)
-        
-        # Log the changes
-        if current:
-            old_status, old_assigned = current
-            if old_status != status:
-                log_ticket_action(ticket_id, None, 'status_changed', old_status, status)
-            if assigned_to and old_assigned != assigned_to:
-                log_ticket_action(ticket_id, None, 'assigned', old_assigned, assigned_to)
-        
-        connection.commit()
-        return True
-    except Error as e:
-        logger.error(f"Error updating ticket: {e}")
-        connection.rollback()
-        return False
-    finally:
-        cursor.close()
-        connection.close()
 
-def log_ticket_action(ticket_id, user_id, action, old_value, new_value):
-    """Log ticket history for audit trail"""
-    connection = get_connection()
-    if not connection:
-        return
+def bulk_create_tickets(tickets_data: List[Dict[str, Any]]) -> List[int]:
+    """Bulk create tickets from list of dictionaries"""
+    db = get_database()
+    created_ids = []
     
-    cursor = connection.cursor()
+    with db.session_scope() as session:
+        for data in tickets_data:
+            ticket = Ticket(
+                title=data.get('title', ''),
+                description=data.get('description', ''),
+                user_email=data.get('user_email'),
+                category=data.get('category', TicketCategory.OTHER),
+                urgency=data.get('urgency', UrgencyLevel.MEDIUM),
+                status=TicketStatus.PENDING
+            )
+            session.add(ticket)
+            session.flush()
+            created_ids.append(ticket.id)
     
-    try:
-        cursor.execute("""
-        INSERT INTO ticket_history (ticket_id, user_id, action, old_value, new_value)
-        VALUES (%s, %s, %s, %s, %s)
-        """, (ticket_id, user_id, action, str(old_value), str(new_value)))
-        connection.commit()
-    except Error as e:
-        logger.error(f"Error logging action: {e}")
-    finally:
-        cursor.close()
-        connection.close()
+    return created_ids
 
-def get_ticket_history(ticket_id):
-    """Get ticket history"""
-    connection = get_connection()
-    if not connection:
-        return []
-    
-    cursor = connection.cursor(dictionary=True)
-    
-    cursor.execute("""
-    SELECT th.*, u.username 
-    FROM ticket_history th
-    LEFT JOIN users u ON th.user_id = u.id
-    WHERE th.ticket_id = %s
-    ORDER BY th.created_at DESC
-    """, (ticket_id,))
-    
-    history = cursor.fetchall()
-    cursor.close()
-    connection.close()
-    
-    return history
 
-def save_notification(ticket_id, type, recipient, subject, message):
-    """Save notification record"""
-    connection = get_connection()
-    if not connection:
-        return None
-    
-    cursor = connection.cursor()
-    
-    try:
-        cursor.execute("""
-        INSERT INTO notifications (ticket_id, type, recipient, subject, message, status)
-        VALUES (%s, %s, %s, %s, %s, 'Sent')
-        """, (ticket_id, type, recipient, subject, message))
+def search_tickets(
+    query: str,
+    limit: int = 50,
+    category: Optional[TicketCategory] = None,
+    urgency: Optional[UrgencyLevel] = None
+) -> List[Ticket]:
+    """Search tickets by text query with optional filters"""
+    db = get_database()
+    with db.session_scope() as session:
+        # Build query
+        search = session.query(Ticket)
         
-        connection.commit()
-        return cursor.lastrowid
-    except Error as e:
-        logger.error(f"Error saving notification: {e}")
-        return None
-    finally:
-        cursor.close()
-        connection.close()
+        # Text search (PostgreSQL full-text search)
+        if query:
+            search = search.filter(
+                text("""
+                    to_tsvector('english', title || ' ' || description) 
+                    @@ plainto_tsquery('english', :query)
+                """)
+            ).params(query=query)
+        
+        # Apply filters
+        if category:
+            search = search.filter(Ticket.category == category)
+        if urgency:
+            search = search.filter(Ticket.urgency == urgency)
+        
+        return search.order_by(Ticket.created_at.desc()).limit(limit).all()
 
-def get_user_tickets(email):
+
+def get_user_tickets(user_id: int, limit: int = 50) -> List[Ticket]:
     """Get tickets for a specific user"""
-    connection = get_connection()
-    if not connection:
-        return pd.DataFrame()
+    db = get_database()
+    with db.session_scope() as session:
+        return session.query(Ticket)\
+            .filter(Ticket.user_id == user_id)\
+            .order_by(Ticket.created_at.desc())\
+            .limit(limit)\
+            .all()
+
+
+def cleanup_old_tickets(days: int = 90) -> int:
+    """Clean up old processed tickets"""
+    db = get_database()
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
     
-    query = """
-    SELECT id, title, category, urgency, status, created_at, updated_at
-    FROM tickets
-    WHERE customer_email = %s
-    ORDER BY created_at DESC
+    with db.session_scope() as session:
+        deleted_count = session.query(Ticket)\
+            .filter(
+                Ticket.status == TicketStatus.PROCESSED,
+                Ticket.processed_at < cutoff_date
+            )\
+            .delete()
+    
+    logger.info(f"Cleaned up {deleted_count} old tickets")
+    return deleted_count
+
+
+# User management functions
+def create_user(email: str, username: str, full_name: Optional[str] = None) -> User:
+    """Create a new user"""
+    db = get_database()
+    with db.session_scope() as session:
+        user = User(
+            email=email,
+            username=username,
+            full_name=full_name
+        )
+        session.add(user)
+        session.flush()
+        return user
+
+
+def get_user_by_email(email: str) -> Optional[User]:
+    """Get user by email"""
+    db = get_database()
+    with db.session_scope() as session:
+        return session.query(User).filter(User.email == email).first()
+
+
+def get_or_create_user(email: str, username: Optional[str] = None) -> User:
+    """Get existing user or create new one"""
+    existing_user = get_user_by_email(email)
+    if existing_user:
+        return existing_user
+    
+    # Create new user
+    if not username:
+        username = email.split('@')[0]
+    
+    return create_user(email, username)
+
+
+# Migration helpers for MySQL to PostgreSQL
+def migrate_from_mysql(mysql_connection_string: str):
     """
-    
-    try:
-        df = pd.read_sql(query, connection, params=[email])
-        return df
-    except Error as e:
-        logger.error(f"Error fetching user tickets: {e}")
-        return pd.DataFrame()
-    finally:
-        connection.close()
-
-def get_agent_performance(date_from=None, date_to=None):
-    """Get agent performance metrics"""
-    connection = get_connection()
-    if not connection:
-        return pd.DataFrame()
-    
-    query = """
-    SELECT 
-        assigned_to as agent,
-        COUNT(*) as total_tickets,
-        SUM(CASE WHEN status = 'Resolved' THEN 1 ELSE 0 END) as resolved_tickets,
-        AVG(CASE WHEN resolved_at IS NOT NULL 
-            THEN TIMESTAMPDIFF(HOUR, created_at, resolved_at) 
-            ELSE NULL END) as avg_resolution_hours,
-        AVG(satisfaction_rating) as avg_satisfaction
-    FROM tickets
-    WHERE assigned_to IS NOT NULL
+    Helper function to migrate data from MySQL to PostgreSQL
+    This is a basic example - customize based on your needs
     """
-    
-    params = []
-    if date_from:
-        query += " AND created_at >= %s"
-        params.append(date_from)
-    if date_to:
-        query += " AND created_at <= %s"
-        params.append(date_to)
-    
-    query += " GROUP BY assigned_to ORDER BY resolved_tickets DESC"
-    
     try:
-        df = pd.read_sql(query, connection, params=params)
-        return df
-    except Error as e:
-        logger.error(f"Error fetching agent performance: {e}")
-        return pd.DataFrame()
-    finally:
-        connection.close()
+        from sqlalchemy import create_engine as create_mysql_engine
+        
+        # Connect to MySQL
+        mysql_engine = create_mysql_engine(mysql_connection_string)
+        
+        # Get PostgreSQL database
+        pg_db = get_database()
+        
+        # Create tables in PostgreSQL
+        pg_db.create_tables()
+        
+        with mysql_engine.connect() as mysql_conn:
+            # Migrate users
+            users_result = mysql_conn.execute(text("SELECT * FROM users"))
+            users_data = [dict(row._mapping) for row in users_result]
+            
+            with pg_db.session_scope() as pg_session:
+                for user_data in users_data:
+                    user = User(**user_data)
+                    pg_session.add(user)
+            
+            # Migrate tickets
+            tickets_result = mysql_conn.execute(text("SELECT * FROM tickets"))
+            tickets_data = [dict(row._mapping) for row in tickets_result]
+            
+            with pg_db.session_scope() as pg_session:
+                for ticket_data in tickets_data:
+                    # Convert MySQL enum values if needed
+                    if 'category' in ticket_data:
+                        ticket_data['category'] = TicketCategory(ticket_data['category'])
+                    if 'urgency' in ticket_data:
+                        ticket_data['urgency'] = UrgencyLevel(ticket_data['urgency'])
+                    if 'status' in ticket_data:
+                        ticket_data['status'] = TicketStatus(ticket_data['status'])
+                    
+                    ticket = Ticket(**ticket_data)
+                    pg_session.add(ticket)
+        
+        logger.info("Migration from MySQL completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        raise
 
-def update_satisfaction_rating(ticket_id, rating):
-    """Update ticket satisfaction rating"""
-    connection = get_connection()
-    if not connection:
-        return False
-    
-    cursor = connection.cursor()
-    
-    try:
-        cursor.execute("""
-        UPDATE tickets 
-        SET satisfaction_rating = %s 
-        WHERE id = %s
-        """, (rating, ticket_id))
-        
-        connection.commit()
-        return True
-    except Error as e:
-        logger.error(f"Error updating rating: {e}")
-        return False
-    finally:
-        cursor.close()
-        connection.close()
 
-def cleanup_old_data(days=90):
-    """Archive or delete old data"""
-    connection = get_connection()
-    if not connection:
-        return
+# Performance optimization for PostgreSQL
+def create_indexes():
+    """Create additional indexes for performance optimization"""
+    db = get_database()
     
-    cursor = connection.cursor()
+    with db.engine.connect() as conn:
+        # Full-text search index
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_tickets_fulltext 
+            ON tickets USING gin(to_tsvector('english', title || ' ' || description))
+        """))
+        
+        # Composite indexes for common queries
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_tickets_user_status 
+            ON tickets(user_id, status, created_at DESC)
+        """))
+        
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_tickets_processing 
+            ON tickets(status, created_at) 
+            WHERE status = 'pending'
+        """))
+        
+        conn.commit()
+        
+    logger.info("Performance indexes created")
+
+
+# Database maintenance utilities
+def vacuum_analyze():
+    """Run VACUUM ANALYZE for PostgreSQL optimization"""
+    db = get_database()
+    with db.engine.connect() as conn:
+        conn.execute(text("VACUUM ANALYZE"))
+        logger.info("VACUUM ANALYZE completed")
+
+
+def get_database_size() -> Dict[str, Any]:
+    """Get database size information"""
+    db = get_database()
+    with db.engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT 
+                pg_database_size(current_database()) as total_size,
+                pg_size_pretty(pg_database_size(current_database())) as total_size_pretty,
+                (SELECT count(*) FROM tickets) as ticket_count,
+                (SELECT count(*) FROM users) as user_count,
+                (SELECT pg_size_pretty(pg_total_relation_size('tickets'))) as tickets_table_size,
+                (SELECT pg_size_pretty(pg_total_relation_size('users'))) as users_table_size
+        """))
+        
+        row = result.first()
+        return {
+            'total_size_bytes': row[0],
+            'total_size_pretty': row[1],
+            'ticket_count': row[2],
+            'user_count': row[3],
+            'tickets_table_size': row[4],
+            'users_table_size': row[5],
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+
+def get_connection_stats() -> Dict[str, Any]:
+    """Get database connection statistics"""
+    db = get_database()
+    with db.engine.connect() as conn:
+        result = conn.execute(text("""
+            SELECT 
+                count(*) as total_connections,
+                count(*) FILTER (WHERE state = 'active') as active_connections,
+                count(*) FILTER (WHERE state = 'idle') as idle_connections,
+                count(*) FILTER (WHERE state = 'idle in transaction') as idle_in_transaction,
+                max(EXTRACT(epoch FROM (now() - query_start))) as longest_query_seconds
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+        """))
+        
+        row = result.first()
+        return {
+            'total_connections': row[0],
+            'active_connections': row[1],
+            'idle_connections': row[2],
+            'idle_in_transaction': row[3],
+            'longest_query_seconds': row[4] or 0,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+
+# Environment-specific configurations
+class DatabaseEnvironment:
+    """Database configuration for different environments"""
+    
+    @staticmethod
+    def get_test_config() -> Dict[str, Any]:
+        """Test environment configuration"""
+        return {
+            'database_url': os.getenv('TEST_DATABASE_URL', 'postgresql://postgres:password@localhost:5432/ticket_system_test'),
+            'echo': True,
+            'pool_size': 1,
+            'max_overflow': 0
+        }
+    
+    @staticmethod
+    def get_development_config() -> Dict[str, Any]:
+        """Development environment configuration"""
+        return {
+            'database_url': DatabaseConfig.get_database_url(),
+            'echo': os.getenv('SQL_ECHO', 'false').lower() == 'true',
+            'pool_size': 5,
+            'max_overflow': 10
+        }
+    
+    @staticmethod
+    def get_production_config() -> Dict[str, Any]:
+        """Production environment configuration"""
+        return {
+            'database_url': DatabaseConfig.get_database_url(),
+            'echo': False,
+            'pool_size': 20,
+            'max_overflow': 40,
+            'pool_pre_ping': True,
+            'pool_recycle': 3600
+        }
+
+
+# Testing utilities
+def create_test_database():
+    """Create a test database with sample data"""
+    db = get_database()
+    
+    # Create tables
+    db.create_tables()
+    
+    # Create test users
+    test_users = [
+        {'email': 'admin@example.com', 'username': 'admin', 'full_name': 'Admin User', 'is_admin': True},
+        {'email': 'user1@example.com', 'username': 'user1', 'full_name': 'Test User 1'},
+        {'email': 'user2@example.com', 'username': 'user2', 'full_name': 'Test User 2'},
+    ]
+    
+    with db.session_scope() as session:
+        for user_data in test_users:
+            user = User(**user_data)
+            session.add(user)
+        session.flush()
+        
+        # Create test tickets
+        test_tickets = [
+            {
+                'title': 'Cannot login to account',
+                'description': 'I forgot my password and cannot reset it. The reset email is not arriving.',
+                'category': TicketCategory.TECHNICAL,
+                'urgency': UrgencyLevel.HIGH,
+                'user_id': 1,
+                'user_email': 'user1@example.com'
+            },
+            {
+                'title': 'Billing issue with subscription',
+                'description': 'I was charged twice for my monthly subscription. Please refund the duplicate charge.',
+                'category': TicketCategory.BILLING,
+                'urgency': UrgencyLevel.HIGH,
+                'user_id': 2,
+                'user_email': 'user2@example.com'
+            },
+            {
+                'title': 'Feature request',
+                'description': 'It would be great if you could add dark mode to the application.',
+                'category': TicketCategory.FEEDBACK,
+                'urgency': UrgencyLevel.LOW,
+                'user_id': 1,
+                'user_email': 'user1@example.com'
+            },
+            {
+                'title': 'General inquiry about pricing',
+                'description': 'What are the differences between the pro and enterprise plans?',
+                'category': TicketCategory.GENERAL,
+                'urgency': UrgencyLevel.MEDIUM,
+                'user_email': 'anonymous@example.com'
+            }
+        ]
+        
+        for ticket_data in test_tickets:
+            ticket = Ticket(**ticket_data)
+            session.add(ticket)
+    
+    logger.info("Test database created with sample data")
+
+
+# Backup and restore utilities
+def backup_database(backup_path: str):
+    """Create a backup of the database (PostgreSQL specific)"""
+    import subprocess
+    
+    db_config = DatabaseConfig()
+    db_url = db_config.get_database_url()
+    
+    # Parse database URL
+    from urllib.parse import urlparse
+    parsed = urlparse(db_url)
+    
+    # Build pg_dump command
+    cmd = [
+        'pg_dump',
+        '-h', parsed.hostname or 'localhost',
+        '-p', str(parsed.port or 5432),
+        '-U', parsed.username or 'postgres',
+        '-d', parsed.path.lstrip('/'),
+        '-f', backup_path,
+        '--verbose',
+        '--format=custom',
+        '--no-owner',
+        '--no-privileges'
+    ]
+    
+    # Set password through environment
+    env = os.environ.copy()
+    if parsed.password:
+        env['PGPASSWORD'] = parsed.password
     
     try:
-        # Archive old tickets
-        cursor.execute("""
-        UPDATE tickets 
-        SET status = 'Archived' 
-        WHERE status = 'Closed' 
-        AND updated_at < DATE_SUB(NOW(), INTERVAL %s DAY)
-        """, (days,))
-        
-        archived_count = cursor.rowcount
-        
-        # Clean old notifications
-        cursor.execute("""
-        DELETE FROM notifications 
-        WHERE sent_at < DATE_SUB(NOW(), INTERVAL %s DAY)
-        """, (days,))
-        
-        deleted_notifications = cursor.rowcount
-        
-        connection.commit()
-        logger.info(f"Archived {archived_count} tickets, deleted {deleted_notifications} old notifications")
-        
-    except Error as e:
-        logger.error(f"Error in cleanup: {e}")
-        connection.rollback()
-    finally:
-        cursor.close()
-        connection.close()
+        subprocess.run(cmd, check=True, env=env)
+        logger.info(f"Database backed up to {backup_path}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Backup failed: {e}")
+        raise
+
+
+def restore_database(backup_path: str):
+    """Restore database from backup"""
+    import subprocess
+    
+    db_config = DatabaseConfig()
+    db_url = db_config.get_database_url()
+    
+    # Parse database URL
+    from urllib.parse import urlparse
+    parsed = urlparse(db_url)
+    
+    # Build pg_restore command
+    cmd = [
+        'pg_restore',
+        '-h', parsed.hostname or 'localhost',
+        '-p', str(parsed.port or 5432),
+        '-U', parsed.username or 'postgres',
+        '-d', parsed.path.lstrip('/'),
+        '--verbose',
+        '--clean',
+        '--if-exists',
+        '--no-owner',
+        '--no-privileges',
+        backup_path
+    ]
+    
+    # Set password through environment
+    env = os.environ.copy()
+    if parsed.password:
+        env['PGPASSWORD'] = parsed.password
+    
+    try:
+        subprocess.run(cmd, check=True, env=env)
+        logger.info(f"Database restored from {backup_path}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Restore failed: {e}")
+        raise
+
+
+# Connection pool monitoring
+def get_pool_status() -> Dict[str, Any]:
+    """Get connection pool status"""
+    db = get_database()
+    pool = db.engine.pool
+    
+    return {
+        'size': getattr(pool, 'size', 0),
+        'checked_in_connections': getattr(pool, 'checkedin', 0),
+        'checked_out_connections': getattr(pool, 'checkedout', 0),
+        'overflow': getattr(pool, 'overflow', 0),
+        'total': getattr(pool, 'checkedin', 0) + getattr(pool, 'checkedout', 0)
+    }
+
+
+# Neon-specific utilities
+def get_neon_branch_info() -> Optional[Dict[str, Any]]:
+    """Get Neon branch information if using Neon"""
+    db = get_database()
+    
+    if 'neon.tech' not in db.database_url:
+        return None
+    
+    try:
+        with db.engine.connect() as conn:
+            # Neon-specific system functions
+            result = conn.execute(text("""
+                SELECT 
+                    current_setting('neon.branch_name', true) as branch_name,
+                    current_setting('neon.project_id', true) as project_id,
+                    pg_is_in_recovery() as is_replica
+            """))
+            
+            row = result.first()
+            return {
+                'branch_name': row[0],
+                'project_id': row[1],
+                'is_replica': row[2],
+                'timestamp': datetime.utcnow().isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Failed to get Neon info: {e}")
+        return None
+
+
+# Export all important functions and classes
+__all__ = [
+    # Core classes
+    'Database',
+    'DatabaseConfig',
+    'Base',
+    
+    # Models
+    'User',
+    'Ticket',
+    'TicketStatus',
+    'TicketCategory', 
+    'UrgencyLevel',
+    
+    # Database functions
+    'get_database',
+    'get_db_session',
+    'get_db',
+    'init_database',
+    
+    # Ticket operations
+    'create_ticket',
+    'get_ticket_by_id',
+    'update_ticket_classification',
+    'get_pending_tickets',
+    'get_tickets_by_status',
+    'get_ticket_statistics',
+    'bulk_create_tickets',
+    'search_tickets',
+    'get_user_tickets',
+    'cleanup_old_tickets',
+    
+    # User operations
+    'create_user',
+    'get_user_by_email',
+    'get_or_create_user',
+    
+    # Utilities
+    'execute_query',
+    'migrate_from_mysql',
+    'create_indexes',
+    'vacuum_analyze',
+    'get_database_size',
+    'get_connection_stats',
+    'create_test_database',
+    'backup_database',
+    'restore_database',
+    'get_pool_status',
+    'get_neon_branch_info'
+]
+
+# Initialize logger for module
+logger.info("PostgreSQL/Neon database module loaded")
