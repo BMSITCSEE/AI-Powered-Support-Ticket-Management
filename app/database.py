@@ -373,6 +373,87 @@ def create_ticket(
     
     return ticket
 
+def save_ticket(
+    title: str,
+    description: str,
+    category: Optional[TicketCategory] = None,
+    urgency: Optional[UrgencyLevel] = None,
+    status: Optional[TicketStatus] = None,
+    user_id: Optional[int] = None,
+    user_email: Optional[str] = None,
+    confidence_score: Optional[float] = None,
+    model_version: Optional[str] = None,
+    ticket_id: Optional[int] = None
+) -> Ticket:
+    """
+    Save a ticket (create new or update existing)
+    
+    Args:
+        title: Ticket title
+        description: Ticket description
+        category: Ticket category (optional)
+        urgency: Urgency level (optional)
+        status: Ticket status (optional)
+        user_id: User ID (optional)
+        user_email: User email (optional)
+        confidence_score: ML model confidence (optional)
+        model_version: ML model version (optional)
+        ticket_id: If provided, updates existing ticket
+    
+    Returns:
+        Saved Ticket object
+    """
+    db = get_database()
+    
+    with db.session_scope() as session:
+        if ticket_id:
+            # Update existing ticket
+            ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
+            if not ticket:
+                raise ValueError(f"Ticket with ID {ticket_id} not found")
+            
+            # Update fields
+            ticket.title = title
+            ticket.description = description
+            if category is not None:
+                ticket.category = category
+            if urgency is not None:
+                ticket.urgency = urgency
+            if status is not None:
+                ticket.status = status
+            if confidence_score is not None:
+                ticket.confidence_score = confidence_score
+            if model_version is not None:
+                ticket.model_version = model_version
+            ticket.updated_at = datetime.utcnow()
+            
+            logger.info(f"Updated ticket ID: {ticket_id}")
+        else:
+            # Create new ticket
+            ticket = Ticket(
+                title=title,
+                description=description,
+                category=category or TicketCategory.OTHER,
+                urgency=urgency or UrgencyLevel.MEDIUM,
+                status=status or TicketStatus.PENDING,
+                user_id=user_id,
+                user_email=user_email,
+                confidence_score=confidence_score,
+                model_version=model_version
+            )
+            session.add(ticket)
+            session.flush()  # Get the ID before commit
+            logger.info(f"Created new ticket ID: {ticket.id}")
+        
+        # Refresh to get all fields
+        session.refresh(ticket)
+        
+        # Create a detached copy to return
+        session.expunge(ticket)
+        make_transient(ticket)
+        
+        return ticket
+
 
 def get_ticket_by_id(ticket_id: int) -> Optional[Ticket]:
     """Get ticket by ID"""
