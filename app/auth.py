@@ -6,7 +6,7 @@ import hashlib
 import jwt
 from datetime import datetime, timedelta
 from app.config import Config
-from app.database import get_connection
+from app.database import get_connection_stats
 import bcrypt
 import secrets
 import psycopg2.extras
