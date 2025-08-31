@@ -11,7 +11,7 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).parent.parent))
 
 from app.config import Config
-from app.database import init_db
+from app.database import init_database
 from app.auth import check_authentication, logout
 from app.pages import submit_ticket, batch_upload, admin_dashboard
 
