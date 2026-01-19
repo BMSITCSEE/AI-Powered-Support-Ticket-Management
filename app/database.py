@@ -1089,3 +1089,13 @@ __all__ = [
 
 # Initialize logger for module
 logger.info("PostgreSQL/Neon database module loaded")
+
+# --- Streamlit compatibility helper ---
+
+def get_connection():
+    """
+    Compatibility wrapper for legacy code.
+    Returns a SQLAlchemy session.
+    """
+    return get_database().get_session()
+
