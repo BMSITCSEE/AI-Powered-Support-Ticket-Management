@@ -14,6 +14,7 @@ from app.config import Config
 import app.database as database
 from app.auth import check_authentication, logout
 from app.pages import submit_ticket, batch_upload, admin_dashboard
+from app.database import init_db
 
 
 #
