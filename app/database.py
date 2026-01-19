@@ -1153,3 +1153,28 @@ def update_ticket_status(ticket_id, new_status):
         cursor.close()
         session.close()
 
+def init_db():
+    """
+    Initialize database tables if they do not exist.
+    Minimal implementation to satisfy main.py call.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                subject VARCHAR(255),
+                description TEXT,
+                category VARCHAR(100),
+                priority VARCHAR(50),
+                status VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
