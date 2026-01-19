@@ -1098,4 +1098,58 @@ def get_connection():
     Returns a SQLAlchemy session.
     """
     return get_database().get_session()
+# ------------------------------------------------------------------
+# Admin dashboard helpers (missing imports fix)
+# ------------------------------------------------------------------
+
+def get_all_tickets():
+    """
+    Fetch all tickets for admin dashboard
+    """
+    session = get_connection()
+    try:
+        cursor = session.cursor()
+        cursor.execute("SELECT * FROM tickets ORDER BY created_at DESC;")
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        cursor.close()
+        session.close()
+
+
+def get_ticket_stats():
+    """
+    Fetch aggregated ticket statistics
+    """
+    session = get_connection()
+    try:
+        cursor = session.cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open,
+                SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed
+            FROM tickets;
+        """)
+        return cursor.fetchone()
+    finally:
+        cursor.close()
+        session.close()
+
+
+def update_ticket_status(ticket_id, new_status):
+    """
+    Update ticket status from admin dashboard
+    """
+    session = get_connection()
+    try:
+        cursor = session.cursor()
+        cursor.execute(
+            "UPDATE tickets SET status = %s WHERE id = %s;",
+            (new_status, ticket_id)
+        )
+        session.commit()
+    finally:
+        cursor.close()
+        session.close()
 
