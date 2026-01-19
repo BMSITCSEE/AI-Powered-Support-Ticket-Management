@@ -9,7 +9,7 @@ import io
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from app.database import save_ticket
+from app.database import save_ticket, TicketCategory, UrgencyLevel
 from models.bert_classifier import BertTicketClassifier
 from tasks.celery_app import process_batch_tickets
 
@@ -198,14 +198,17 @@ def show():
                             for idx, row in df.iterrows():
                                 status_text.text(f"Processing ticket {idx + 1}/{len(df)}: {row['title'][:50]}...")
                                 
-                                # Save ticket with pending classification
-                                ticket_id = save_ticket(
+                                # Save ticket with pending classification 
+                                ticket = save_ticket(
                                     title=row['title'],
                                     description=row['description'],
-                                    category="Pending",
-                                    urgency="Pending",
-                                    customer_email=row['customer_email']
+                                    category=TicketCategory.OTHER,
+                                    urgency=UrgencyLevel.MEDIUM,
+                                    user_email=row['customer_email']
                                 )
+                                
+                                ticket_ids.append(ticket.id)
+
                                 
                                 if ticket_id:
                                     ticket_ids.append(ticket_id)
@@ -219,7 +222,7 @@ def show():
                                 # Try to trigger async batch processing
                                 try:
                                     from tasks.celery_app import process_batch_tickets
-                                    result = process_batch_tickets.delay(ticket_ids)
+                                    result = process_batch_tickets(ticket_ids)
                                     st.info(f"🔄 Batch processing queued (Task ID: {result.id})")
                                 except Exception as e:
                                     st.warning(f"Async processing unavailable: {e}")
